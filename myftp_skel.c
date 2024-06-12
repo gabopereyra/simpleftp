@@ -1,11 +1,9 @@
 #include <stdio.h>
 #include <stdlib.h>
-
 #include <string.h>
 #include <stdbool.h>
 #include <unistd.h>
 #include <err.h>
-
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
@@ -25,17 +23,17 @@ bool recv_msg(int sd, int code, char *text) {
     int recv_s, recv_code;
 
     // receive the answer
-
+    recv_s = recv(sd, buffer, BUFSIZE, 0);
 
     // error checking
-    if (recv_s < 0) warn("error receiving data");
-    if (recv_s == 0) errx(1, "connection closed by host");
+    if (recv_s < 0) warn("Error receiving data");
+    if (recv_s == 0) errx(1, "Connection closed by host");
 
     // parsing the code and message receive from the answer
     sscanf(buffer, "%d %[^\r\n]\r\n", &recv_code, message);
     printf("%d %s\n", recv_code, message);
     // optional copy of parameters
-    if(text) strcpy(text, message);
+    if (text) strcpy(text, message);
     // boolean test for the code
     return (code == recv_code) ? true : false;
 }
@@ -49,14 +47,16 @@ bool recv_msg(int sd, int code, char *text) {
 void send_msg(int sd, char *operation, char *param) {
     char buffer[BUFSIZE] = "";
 
-    // command formating
+    // command formatting
     if (param != NULL)
         sprintf(buffer, "%s %s\r\n", operation, param);
     else
         sprintf(buffer, "%s\r\n", operation);
 
     // send command and check for errors
-
+    if (send(sd, buffer, strlen(buffer), 0) < 0) {  
+        warn("ERROR: sending command");
+    }
 }
 
 /**
@@ -80,29 +80,34 @@ void authenticate(int sd) {
     int code;
 
     // ask for user
-    printf("username: ");
+    printf("Username: ");
     input = read_input();
 
     // send the command to the server
-    
-    // relese memory
+    send_msg(sd, "USER", input);
+
+    // release memory
     free(input);
 
     // wait to receive password requirement and check for errors
-
+    if (!recv_msg(sd, 331, NULL)) {
+        errx(1, "Invalid username");
+    }
 
     // ask for password
-    printf("passwd: ");
+    printf("Password: ");
     input = read_input();
 
     // send the command to the server
-
+    send_msg(sd, "PASS", input);
 
     // release memory
     free(input);
 
     // wait for answer and process it and check for errors
-
+    if (!recv_msg(sd, 230, NULL)) {
+        errx(1, "Authentication failed");
+    }
 }
 
 /**
@@ -116,8 +121,12 @@ void get(int sd, char *file_name) {
     FILE *file;
 
     // send the RETR command to the server
+    send_msg(sd, "RETR", file_name);
 
     // check for the response
+    if (!recv_msg(sd, 299, buffer)) {
+        errx(1, "Failed to retrieve file");
+    }
 
     // parsing the file size from the answer received
     // "File %s size %ld bytes"
@@ -125,16 +134,28 @@ void get(int sd, char *file_name) {
 
     // open the file to write
     file = fopen(file_name, "w");
+    if (file == NULL) {
+        err(1, "Failed to open file");
+    }
 
-    //receive the file
+    // receive the file
+    while ((recv_s = recv(sd, buffer, r_size, 0)) > 0) {
+        fwrite(buffer, 1, recv_s, file);
+    }
 
-
+    if (recv_s < 0) {
+        err(1, "Error receiving file");
+    }
 
     // close the file
     fclose(file);
 
     // receive the OK from the server
-
+    if (recv_msg(sd, 226, NULL)) {
+        printf("File transfer successfully.");
+    } else {
+        errx(1, "File transfer not completed successfully");
+    }
 }
 
 /**
@@ -143,9 +164,10 @@ void get(int sd, char *file_name) {
  **/
 void quit(int sd) {
     // send command QUIT to the client
+    send_msg(sd, "QUIT", NULL);
 
     // receive the answer from the server
-
+    recv_msg(sd, 221, NULL);
 }
 
 /**
@@ -165,12 +187,10 @@ void operate(int sd) {
         if (strcmp(op, "get") == 0) {
             param = strtok(NULL, " ");
             get(sd, param);
-        }
-        else if (strcmp(op, "quit") == 0) {
+        } else if (strcmp(op, "quit") == 0) {
             quit(sd);
             break;
-        }
-        else {
+        } else {
             // new operations in the future
             printf("TODO: unexpected command\n");
         }
@@ -183,21 +203,43 @@ void operate(int sd) {
  * Run with
  *         ./myftp <SERVER_IP> <SERVER_PORT>
  **/
-int main (int argc, char *argv[]) {
+int main(int argc, char *argv[]) {
     int sd;
     struct sockaddr_in addr;
 
     // arguments checking
+    if (argc != 3) {
+        errx(1, "ERROR: not enough data, check the arguments and try again.");
+    }
 
     // create socket and check for errors
-    
-    // set socket data    
+    if ((sd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
+        err(1, "Socket creation failed");
+    }
+
+    // set socket data
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(atoi(argv[2]));
+    if (inet_pton(AF_INET, argv[1], &(addr.sin_addr)) <= 0) {
+        err(1, "ERROR: check the IP address and try again");
+    }
 
     // connect and check for errors
+    if (connect(sd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {     // Ver pag 13 donde menciona el casteo
+        err(1, "Connection failed");
+    }
 
     // if receive hello proceed with authenticate and operate if not warning
+    if (recv_msg(sd, 220, NULL)) {
+        authenticate(sd);
+        operate(sd);
+    } else {
+        errx(1, "Failed to receive 'hello message' from server.");
+    }
 
     // close socket
+    close(sd);
 
     return 0;
 }

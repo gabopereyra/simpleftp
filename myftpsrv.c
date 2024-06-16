@@ -20,6 +20,9 @@
 #define MSG_299 "299 File %s size %ld bytes\r\n"
 #define MSG_226 "226 Transfer complete\r\n"
 
+// global variable to store PORT data connection
+struct sockaddr_in client_data_addr;
+
 /**
  * function: receive the commands from the client
  * sd: socket descriptor
@@ -120,6 +123,22 @@ void retr(int sd, char *file_path) {
     // important delay for avoid problems with buffer size
     sleep(1);
 
+    // new socket for data connection
+    int data_sd = socket(AF_INET, SOCK_STREAM, 0);
+    if (data_sd < 0) {
+        perror("ERROR: failed to create data socket");
+        fclose(file);
+        return;
+    }
+
+    // connect to the client by data port
+    if (connect(data_sd, (struct sockaddr*)&client_data_addr, sizeof(client_data_addr)) < 0) {
+        perror("ERROR: failed to connect to client data socket");
+        close(data_sd);
+        fclose(file);
+        return;
+    }
+
     // send the file
     while ((bread = fread(buffer, 1, BUFSIZE, file)) > 0) {
         if (send(sd, buffer, bread, 0) < 0) {
@@ -132,7 +151,10 @@ void retr(int sd, char *file_path) {
     // close the file
     fclose(file);
 
-     // send a completed transfer message
+    //close data socket
+    close(data_sd);
+
+    // send a completed transfer message
     send_ans(sd, MSG_226);
 }
 
@@ -211,26 +233,38 @@ void operate(int sd) {
 
     while (true) {
         op[0] = param[0] = '\0';
-
         // check for commands send by the client if not inform and exit
         if (!recv_cmd(sd, op, param)) {
-            warn("error receiving command");
-            break;
-        }
+                printf("Error: failed to receive command\n");
+                break;
+            }
 
         if (strcmp(op, "RETR") == 0) {
             retr(sd, param);
         } else if (strcmp(op, "QUIT") == 0) {
             // send goodbye and close connection
-            send_ans(sd, MSG_221);
+            send_ans(sd,MSG_221);
+            close(sd);
             break;
-        } else {
+        }else if(strcmp(op, "PORT") == 0){
+        // Parse and store the client's data port address
+            struct sockaddr_in data_addr;
+            unsigned int ip[4], p1, p2;
+            sscanf(param, "%u,%u,%u,%u,%u,%u", &ip[0], &ip[1], &ip[2], &ip[3], &p1, &p2);
+            char ip_str[16];
+            sprintf(ip_str, "%u.%u.%u.%u", ip[0], ip[1], ip[2], ip[3]);
+            data_addr.sin_family = AF_INET;
+            inet_pton(AF_INET, ip_str, &data_addr.sin_addr);
+            data_addr.sin_port = htons(p1 * 256 + p2);
+
+            // Store the data address in a global or context variable
+            memcpy(&client_data_addr, &data_addr, sizeof(data_addr));
+        }else {
             // invalid command
+            // future use
             warnx("unexpected command: %s", op);
         }
     }
-
-    close(sd);
 }
 
 /**
@@ -238,7 +272,6 @@ void operate(int sd) {
  *         ./mysrv <SERVER_PORT>
  **/
 int main (int argc, char *argv[]) {
-
     // arguments checking
     if (argc < 2) {
         errx(1, "Port expected as argument");
@@ -256,7 +289,7 @@ int main (int argc, char *argv[]) {
     if (master_sd < 0) err(1, "socket creation failed");
 
     // bind master socket and check errors
-    memset(&master_addr, 0, sizeof(master_addr));
+    memset(&master_addr, 0, sizeof(master_addr)); //ver esta esta comentada
     master_addr.sin_family = AF_INET;
     master_addr.sin_addr.s_addr = htonl(INADDR_ANY);
     master_addr.sin_port = htons(atoi(argv[1]));
@@ -267,6 +300,8 @@ int main (int argc, char *argv[]) {
     // make it listen
     if (listen(master_sd, 5) < 0)
         err(1, "listen failed");
+
+    printf("Waiting connections...\n");
 
     // main loop
     while (true) {
@@ -282,7 +317,20 @@ int main (int argc, char *argv[]) {
 
         // operate only if authenticate is true
         if (authenticate(slave_sd)) {
-            operate(slave_sd);
+            // fork() new client
+            pid_t pid = fork();
+            if (pid < 0) {
+                errx(1, "ERROR: cannot create new process.\n");
+            }
+            //child process
+            if(pid == 0){
+                close(master_sd);
+                operate(slave_sd);
+                close(slave_sd);
+                exit(0);
+            }else {
+                close(slave_sd);
+            }
         } else {
             close(slave_sd);
         }

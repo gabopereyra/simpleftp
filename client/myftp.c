@@ -110,6 +110,54 @@ void authenticate(int sd) {
     }
 }
 
+int send_port_command(int sd) {
+    //Create a new socket for data connection
+    int data_sd = socket(AF_INET, SOCK_STREAM, 0);
+    if (data_sd < 0) {
+        perror("ERROR: failed to create data socket");
+        exit(EXIT_FAILURE);
+    }
+
+    //assign a random port
+    struct sockaddr_in data_addr;
+    socklen_t addr_len = sizeof(data_addr);
+    data_addr.sin_family = AF_INET;
+    data_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    data_addr.sin_port = htons(0); 
+
+    if (bind(data_sd, (struct sockaddr*)&data_addr, sizeof(data_addr)) < 0) {
+        perror("ERROR: failed to bind data socket");
+        close(data_sd);
+        exit(EXIT_FAILURE);
+    }
+
+    // get assigned port
+    if (getsockname(data_sd, (struct sockaddr*)&data_addr, &addr_len) < 0) {
+        perror("ERROR: failed to get data socket name");
+        close(data_sd);
+        exit(EXIT_FAILURE);
+    }
+
+    unsigned char* ip = (unsigned char*)&data_addr.sin_addr.s_addr;
+    unsigned char* port = (unsigned char*)&data_addr.sin_port;
+
+    char port_param[BUFSIZE];
+    sprintf(port_param, "%d,%d,%d,%d,%d,%d",
+            ip[0], ip[1], ip[2], ip[3], ntohs(data_addr.sin_port) / 256, ntohs(data_addr.sin_port) % 256);
+
+    // send port command
+    send_msg(sd, "PORT", port_param);
+
+    // listenig socket
+   if (listen(data_sd, 1) < 0) {
+        perror("ERROR: failed to listen on data socket");
+        close(data_sd);
+        exit(EXIT_FAILURE);
+    }
+    
+   return data_sd;
+}
+
 /**
  * function: operation get
  * sd: socket descriptor
@@ -119,6 +167,11 @@ void get(int sd, char *file_name) {
     char desc[BUFSIZE], buffer[BUFSIZE];
     int f_size, recv_s, r_size = BUFSIZE;
     FILE *file;
+    struct sockaddr_in data_addr;
+    socklen_t data_addr_len = sizeof(data_addr);
+
+    // send the PORT command to the server
+    int data_socket = send_port_command(sd);
 
     // send the RETR command to the server
     send_msg(sd, "RETR", file_name);
@@ -138,6 +191,14 @@ void get(int sd, char *file_name) {
         err(1, "Failed to open file");
     }
 
+    //accepting connection from the server
+    int data_sd = accept(data_socket, (struct sockaddr*)&data_addr, &data_addr_len);
+    if (data_sd < 0) {
+        perror("ERROR: failed to accept data connection");
+        fclose(file);
+        return;
+    }
+
     // receive the file
     while ((recv_s = recv(sd, buffer, r_size, 0)) > 0) {
         fwrite(buffer, 1, recv_s, file);
@@ -149,6 +210,9 @@ void get(int sd, char *file_name) {
 
     // close the file
     fclose(file);
+
+    //close data socket
+    close(data_sd);
 
     // receive the OK from the server
     if (recv_msg(sd, 226, NULL)) {
